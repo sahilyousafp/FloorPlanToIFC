@@ -84,14 +84,9 @@ def load_model():
 
 
 def myImageLoader(imageInput):
-	image =  numpy.asarray(imageInput)
-	
-	
-	h,w,c=image.shape 
-	if image.ndim != 3:
-		image = skimage.color.gray2rgb(image)
-		if image.shape[-1] == 4:
-			image = image[..., :3]
+	# the model expects 3 channels, so normalize grayscale, palette and RGBA inputs
+	image = numpy.asarray(imageInput.convert('RGB'))
+	h,w,c=image.shape
 	return image,w,h
 
 def getClassNames(classIds):
@@ -125,7 +120,7 @@ def normalizePoints(bbx,classNames):
 
 
 		result.append([bb[0]*normalizingY,bb[1]*normalizingX,bb[2]*normalizingY,bb[3]*normalizingX])
-	return result,(doorDifference/doorCount)	
+	return result,(doorDifference/doorCount if doorCount else 0)	
 		
 
 def turnSubArraysToJson(objectsArr):
@@ -139,6 +134,11 @@ def turnSubArraysToJson(objectsArr):
 		result.append(data)
 	return result
 
+
+
+@application.route('/',methods=['GET'])
+def viewer():
+	return application.send_static_file('index.html')
 
 
 @application.route('/',methods=['POST'])
@@ -166,6 +166,7 @@ def prediction():
 	data['Width']=w
 	data['Height']=h
 	data['averageDoor']=averageDoor
+	data['scores']=r['scores'].tolist()
 	return jsonify(data)
 		
     

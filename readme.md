@@ -58,6 +58,14 @@ python application.py
 
 ```
 
+## Browser Viewer
+
+With the server running, open [http://127.0.0.1:5000/](http://127.0.0.1:5000/) to use the built-in Three.js viewer. Choose or drop a floor plan image and press **Detect** to see the detected walls, doors and windows extruded in 3D, or switch to the top view to check the boxes against the plan. You can filter by class and confidence and change the wall height. Hover a box to see its class, score and pixel coordinates.
+
+**Download IFC4** saves the visible elements as an IFC4 file (`IfcWall`, `IfcDoor`, `IfcWindow` in a site, building and storey hierarchy, in meters). Doors and windows that overlap a wall cut an `IfcOpeningElement` into it. Each element carries a `FloorPlanTo3D_Detection` property set with its confidence and pixel bounding box.
+
+The viewer lives in `static/` and needs no build step. The API response it uses also includes a `scores` array, parallel to `classes`.
+
 These steps will prepare your environment for using the API. While the API can be accessed with any client, for a fully integrated experience, we recommend using our Unity application, located in the Unity directory (Unity engine installation required).
 
 ## Customization Features, download from this link [Our Unity Client](https://github.com/fadyazizz/FloorPlanTo3D-unityClient)

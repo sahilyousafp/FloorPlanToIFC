@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FloorPlanTo3D Viewer</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <header class="brand">
+        <h1>FloorPlanTo3D</h1>
+        <p>Mask R-CNN detections, in 3D</p>
+      </header>
+
+      <section class="section">
+        <label class="drop" id="drop">
+          <input type="file" id="file" accept="image/*">
+          <span class="drop-title" id="drop-title">Choose a floor plan</span>
+          <span class="drop-hint" id="drop-hint">or drop an image here</span>
+        </label>
+        <button class="btn" id="detect" disabled>Detect</button>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="section" id="results" hidden>
+        <h2>Detections</h2>
+        <ul class="classes">
+          <li>
+            <label class="toggle"><input type="checkbox" data-class="wall" checked><span class="swatch wall"></span>Walls</label>
+            <span class="count" data-count="wall">0</span>
+          </li>
+          <li>
+            <label class="toggle"><input type="checkbox" data-class="door" checked><span class="swatch door"></span>Doors</label>
+            <span class="count" data-count="door">0</span>
+          </li>
+          <li>
+            <label class="toggle"><input type="checkbox" data-class="window" checked><span class="swatch window"></span>Windows</label>
+            <span class="count" data-count="window">0</span>
+          </li>
+        </ul>
+
+        <div class="field">
+          <div class="field-row">
+            <label for="confidence">Min. confidence</label>
+            <output id="confidence-value" for="confidence">0.70</output>
+          </div>
+          <input type="range" id="confidence" min="0.7" max="1" step="0.01" value="0.7">
+        </div>
+      </section>
+
+      <section class="section" id="view-section" hidden>
+        <h2>View</h2>
+        <div class="segmented" role="radiogroup" aria-label="Camera">
+          <button type="button" role="radio" aria-checked="true" data-view="3d">3D</button>
+          <button type="button" role="radio" aria-checked="false" data-view="2d">Top</button>
+        </div>
+        <label class="toggle"><input type="checkbox" id="show-plan" checked>Show plan image</label>
+        <div class="field">
+          <div class="field-row">
+            <label for="wall-height">Wall height</label>
+            <output id="wall-height-value" for="wall-height">2.7 m</output>
+          </div>
+          <input type="range" id="wall-height" min="1" max="5" step="0.1" value="2.7">
+        </div>
+        <dl class="meta" id="meta"></dl>
+      </section>
+
+      <section class="section" id="export-section" hidden>
+        <h2>Export</h2>
+        <button type="button" class="btn btn-secondary" id="export-ifc" disabled>Download IFC4</button>
+        <p class="hint">Exports the walls, doors and windows currently shown, at the chosen wall height. Doors and windows follow the direction of their wall and cut an opening where they overlap it.</p>
+      </section>
+    </aside>
+
+    <main class="stage" id="stage">
+      <div class="empty" id="empty">
+        <p>Choose a floor plan image to start.</p>
+      </div>
+      <div class="tooltip" id="tooltip" hidden></div>
+    </main>
+  </div>
+</body>
+</html>

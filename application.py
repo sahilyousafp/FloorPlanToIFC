@@ -1,44 +1,16 @@
 import os
-import PIL
-import numpy
-
-
-from numpy.lib.function_base import average
-
-
-from numpy import zeros
-from numpy import asarray
-
-from mrcnn.config import Config
-
-from mrcnn.model import MaskRCNN
-
-from skimage.draw import polygon2mask
-from skimage.io import imread
-
-from datetime import datetime
-
-
-
-from io import BytesIO
-from mrcnn.utils import extract_bboxes
-from numpy import expand_dims
-from matplotlib import pyplot
-from matplotlib.patches import Rectangle
-from keras.backend import clear_session
-import json
-from flask import Flask, flash, request,jsonify, redirect, url_for
-from werkzeug.utils import secure_filename
-
-from skimage.io import imread
-from mrcnn.model import mold_image
-
-import tensorflow as tf
+import math
 import sys
 
-from PIL import Image
+import cv2
+import numpy
+import PIL
+import tensorflow as tf
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-
+from mrcnn.config import Config
+from mrcnn.model import MaskRCNN
 
 
 global _model
@@ -47,12 +19,14 @@ global cfg
 ROOT_DIR = os.path.abspath("./")
 WEIGHTS_FOLDER = "./weights"
 
-from flask_cors import CORS, cross_origin
-
 sys.path.append(ROOT_DIR)
 
 MODEL_NAME = "mask_rcnn_hq"
 WEIGHTS_FILE_NAME = 'maskrcnn_15_epochs.h5'
+
+# A mask whose long axis is within this many degrees of horizontal or vertical is
+# treated as axis-aligned, since almost all plans are drawn orthogonally.
+AXIS_SNAP_DEGREES = 3
 
 application=Flask(__name__)
 cors = CORS(application, resources={r"/*": {"origins": "*"}})
@@ -66,7 +40,11 @@ class PredictionConfig(Config):
 	# simplify GPU config
 	GPU_COUNT = 1
 	IMAGES_PER_GPU = 1
-	
+	# Keep weaker detections too; clients filter by score (the viewer has a slider).
+	DETECTION_MIN_CONFIDENCE = 0.5
+	# Large plans have well over 100 wall segments.
+	DETECTION_MAX_INSTANCES = 300
+
 @application.before_first_request
 def load_model():
 	global cfg
@@ -99,29 +77,14 @@ def getClassNames(classIds):
 			data['name']='window'
 		if classid==3:
 			data['name']='door'
-		result.append(data)	
+		result.append(data)
 
-	return result				
-def normalizePoints(bbx,classNames):
-	normalizingX=1
-	normalizingY=1
-	result=list()
-	doorCount=0
-	index=-1
-	doorDifference=0
-	for bb in bbx:
-		index=index+1
-		if(classNames[index]==3):
-			doorCount=doorCount+1
-			if(abs(bb[3]-bb[1])>abs(bb[2]-bb[0])):
-				doorDifference=doorDifference+abs(bb[3]-bb[1])
-			else:
-				doorDifference=doorDifference+abs(bb[2]-bb[0])
+	return result
 
-
-		result.append([bb[0]*normalizingY,bb[1]*normalizingX,bb[2]*normalizingY,bb[3]*normalizingX])
-	return result,(doorDifference/doorCount if doorCount else 0)	
-		
+def averageDoorSize(bbx,classIds):
+	# Mean of each door's longer bbox side, in pixels. Clients use it to set the plan scale.
+	sizes=[max(abs(bb[3]-bb[1]),abs(bb[2]-bb[0])) for bb,classid in zip(bbx,classIds) if classid==3]
+	return sum(sizes)/len(sizes) if sizes else 0
 
 def turnSubArraysToJson(objectsArr):
 	result=list()
@@ -134,6 +97,53 @@ def turnSubArraysToJson(objectsArr):
 		result.append(data)
 	return result
 
+def maskGeometry(mask,roi):
+	"""Fits a detection's mask with a rectangle.
+
+	Returns (bbox, shape): bbox is the tight axis-aligned [y1, x1, y2, x2] of the mask,
+	shape is the oriented rectangle {cx, cy, length, thickness, angle} in pixels, where
+	angle is the direction of the long side in degrees from +x (image y points down).
+	Falls back to the model's roi when the mask is empty.
+	"""
+	contours,_=cv2.findContours(mask.astype(numpy.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+	contours=[c for c in contours if cv2.contourArea(c)>0]
+	if not contours:
+		y1,x1,y2,x2=[int(v) for v in roi]
+		return [y1,x1,y2,x2],axisAlignedShape(x1,y1,x2,y2)
+
+	largest=max(contours,key=cv2.contourArea)
+	x,y,w,h=cv2.boundingRect(largest)
+	bbox=[y,x,y+h,x+w]
+
+	corners=cv2.boxPoints(cv2.minAreaRect(largest))
+	edgeA=corners[1]-corners[0]
+	edgeB=corners[2]-corners[1]
+	longEdge,shortEdge=(edgeA,edgeB) if numpy.hypot(*edgeA)>=numpy.hypot(*edgeB) else (edgeB,edgeA)
+	angle=math.degrees(math.atan2(longEdge[1],longEdge[0]))%180
+	if min(angle,180-angle)<=AXIS_SNAP_DEGREES or abs(angle-90)<=AXIS_SNAP_DEGREES:
+		return bbox,axisAlignedShape(x,y,x+w,y+h)
+
+	center=corners.mean(axis=0)
+	return bbox,{
+		'cx':float(center[0]),
+		'cy':float(center[1]),
+		'length':float(numpy.hypot(*longEdge)),
+		'thickness':float(numpy.hypot(*shortEdge)),
+		'angle':float(angle),
+	}
+
+def axisAlignedShape(x1,y1,x2,y2):
+	# Same orientation rule as the Unity client: the longer bbox side is the element's length.
+	w=x2-x1
+	h=y2-y1
+	return {
+		'cx':(x1+x2)/2,
+		'cy':(y1+y2)/2,
+		'length':float(max(w,h)),
+		'thickness':float(min(w,h)),
+		'angle':90.0 if h>w else 0.0,
+	}
+
 
 
 @application.route('/',methods=['GET'])
@@ -143,33 +153,34 @@ def viewer():
 
 @application.route('/',methods=['POST'])
 def prediction():
-	global cfg
 	imagefile = PIL.Image.open(request.files['image'].stream)
 	image,w,h=myImageLoader(imagefile)
 	print(h,w)
-	scaled_image = mold_image(image, cfg)
-	sample = expand_dims(scaled_image, 0)
 
 	global _model
 	global _graph
+	# detect() resizes and subtracts the mean pixel itself, so it gets the raw RGB image.
 	with _graph.as_default():
-		r = _model.detect(sample, verbose=0)[0]
-	
-	#output_data = model_api(imagefile)
-	
+		r = _model.detect([image], verbose=0)[0]
+
+	bbx=list()
+	shapes=list()
+	for i,roi in enumerate(r['rois']):
+		bbox,shape=maskGeometry(r['masks'][:,:,i],roi)
+		bbx.append(bbox)
+		shapes.append(shape)
+
 	data={}
-	bbx=r['rois'].tolist()
-	temp,averageDoor=normalizePoints(bbx,r['class_ids'])
-	temp=turnSubArraysToJson(temp)
-	data['points']=temp
+	data['points']=turnSubArraysToJson(bbx)
 	data['classes']=getClassNames(r['class_ids'])
 	data['Width']=w
 	data['Height']=h
-	data['averageDoor']=averageDoor
+	data['averageDoor']=averageDoorSize(bbx,r['class_ids'])
 	data['scores']=r['scores'].tolist()
+	data['shapes']=shapes
 	return jsonify(data)
-		
-    
+
+
 if __name__ =='__main__':
 	application.debug=True
 	print('===========before running==========')

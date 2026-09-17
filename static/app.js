@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildIfc } from './ifc.js';
-import { CLASSES, footprint, metersPerPx, verticalExtent } from './layout.js';
+import { CLASSES, buildPlanModel, metersPerPx, verticalExtent } from './layout.js';
 
 // Openings are drawn slightly larger than walls so they stay visible through them.
 const OPENING_INFLATE_M = 0.03;
+// Room tints float just above the plan image so they never z-fight with it.
+const SPACE_Y_M = 0.004;
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -68,7 +70,12 @@ controls2d.enabled = false;
 
 const planGroup = new THREE.Group();
 const classGroups = Object.fromEntries(CLASSES.map((c) => [c, new THREE.Group()]));
-scene.add(planGroup, ...Object.values(classGroups));
+const spaceGroup = new THREE.Group();
+scene.add(planGroup, spaceGroup, ...Object.values(classGroups));
+
+// Every wall, door and window is this unit box, scaled and rotated into place.
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const unitBoxEdges = new THREE.EdgesGeometry(unitBox);
 
 const materials = {};
 const edgeMaterials = {};
@@ -81,13 +88,17 @@ function createMaterials() {
   materials.wall = new THREE.MeshStandardMaterial({ roughness: 0.85, transparent: true });
   materials.door = new THREE.MeshStandardMaterial({ roughness: 0.6, transparent: true, opacity: 0.55, depthWrite: false });
   materials.window = new THREE.MeshStandardMaterial({ roughness: 0.2, transparent: true, opacity: 0.45, depthWrite: false });
-  for (const c of CLASSES) edgeMaterials[c] = new THREE.LineBasicMaterial({ transparent: true });
+  materials.space = new THREE.MeshBasicMaterial({
+    transparent: true, opacity: 0.28, depthWrite: false, side: THREE.DoubleSide,
+  });
+  for (const c of [...CLASSES, 'space']) edgeMaterials[c] = new THREE.LineBasicMaterial({ transparent: true });
+  edgeMaterials.space.opacity = 0.8;
   applyTheme();
 }
 
 function applyTheme() {
   scene.background = new THREE.Color(cssVar('--scene'));
-  for (const c of CLASSES) {
+  for (const c of [...CLASSES, 'space']) {
     const color = new THREE.Color(cssVar(`--${c}`));
     materials[c].color.copy(color);
     edgeMaterials[c].color.copy(color).multiplyScalar(c === 'wall' ? 0.55 : 0.8);
@@ -157,7 +168,9 @@ async function decodeFile(file) {
   ui.exportSection.hidden = true;
   setStatus('');
 
-  clearDetections();
+  state.detections = [];
+  clearScene();
+  ui.exportIfc.disabled = true;
   setupPlan(canvas, 0);
   ui.viewSection.hidden = false;
   renderMeta(null);
@@ -190,6 +203,7 @@ async function runDetection() {
     const detections = data.points.map((p, i) => ({
       cls: data.classes[i].name,
       score: data.scores ? data.scores[i] : 1,
+      shape: data.shapes?.[i],
       ...p,
     }));
     showDetections(data, detections);
@@ -203,21 +217,11 @@ async function runDetection() {
 }
 
 function showDetections(data, detections) {
-  clearDetections();
   state.detections = detections;
   setupPlan(state.canvas, data.averageDoor);
 
-  for (const d of detections) {
-    if (!classGroups[d.cls]) continue;
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), materials[d.cls]);
-    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterials[d.cls]));
-    mesh.userData.detection = d;
-    classGroups[d.cls].add(mesh);
-  }
-  layoutMeshes();
-
   for (const c of CLASSES) {
-    ui.results.querySelector(`[data-count="${c}"]`).textContent = classGroups[c].children.length;
+    ui.results.querySelector(`[data-count="${c}"]`).textContent = detections.filter((d) => d.cls === c).length;
   }
   ui.results.hidden = false;
   ui.exportSection.hidden = false;
@@ -225,7 +229,38 @@ function showDetections(data, detections) {
   renderMeta(data);
 }
 
-// Positions every detection box from its pixel bbox and the current wall height.
+// Rebuilds walls, gap fillers, openings and rooms from the detections that pass the filters.
+function rebuildScene() {
+  clearScene();
+  const model = buildPlanModel(visibleDetections(), state);
+
+  const addBox = (cls, rect, info) => {
+    const mesh = new THREE.Mesh(unitBox, materials[cls]);
+    mesh.add(new THREE.LineSegments(unitBoxEdges, edgeMaterials[cls]));
+    mesh.userData = { cls, rect, ...info };
+    classGroups[cls].add(mesh);
+  };
+  for (const wall of model.walls) addBox('wall', wall.rect, { detection: wall.d });
+  for (const filler of model.fillers) addBox('wall', filler.rect, { filler: true });
+  for (const opening of model.openings) addBox(opening.d.cls, opening.rect, { detection: opening.d });
+
+  model.spaces.forEach((space, i) => {
+    // The shape is drawn in (x, -y) so that lying it flat puts plan y on +z.
+    const shape = new THREE.Shape(space.polygon.map(([x, y]) => new THREE.Vector2(x, -y)));
+    const geometry = new THREE.ShapeGeometry(shape);
+    const mesh = new THREE.Mesh(geometry, materials.space);
+    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry), edgeMaterials.space));
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = SPACE_Y_M;
+    mesh.userData = { cls: 'space', name: `Space ${i + 1}`, area: space.area };
+    spaceGroup.add(mesh);
+  });
+  ui.results.querySelector('[data-count="space"]').textContent = model.spaces.length;
+
+  layoutMeshes();
+}
+
+// Places every box from its plan rectangle and the current wall height.
 function layoutMeshes() {
   const wallHeight = Number(ui.wallHeight.value);
   const flat = state.view === '2d';
@@ -239,9 +274,11 @@ function layoutMeshes() {
         bottom = 0.01 + CLASSES.indexOf(c) * 0.01;
         top = bottom + 0.005;
       }
-      const f = footprint(mesh.userData.detection, state);
-      mesh.scale.set(f.sx + inflate, top - bottom, f.sy + inflate);
-      mesh.position.set(f.cx, (bottom + top) / 2, f.cy);
+      const { rect } = mesh.userData;
+      mesh.scale.set(rect.length + inflate, top - bottom, rect.thickness + inflate);
+      // Plan y runs along +z, so a rotation from +x towards +y is negative about y.
+      mesh.rotation.y = -rect.angle;
+      mesh.position.set(rect.cx, (bottom + top) / 2, rect.cy);
     }
   }
 }
@@ -267,17 +304,17 @@ function setupPlan(canvas, averageDoor) {
   frameCameras();
 }
 
-function clearDetections() {
+function clearScene() {
   for (const c of CLASSES) disposeGroup(classGroups[c]);
-  state.detections = [];
-  ui.exportIfc.disabled = true;
+  disposeGroup(spaceGroup);
   hideTooltip();
 }
 
 function disposeGroup(group) {
   for (const child of [...group.children]) {
     child.traverse((o) => {
-      o.geometry?.dispose();
+      // The unit box is shared by every element; rooms and the plan own their geometry.
+      if (o.geometry !== unitBox && o.geometry !== unitBoxEdges) o.geometry?.dispose();
       // Class materials are shared and reused; only the plan owns its material.
       if (group === planGroup && o.material) {
         o.material.map?.dispose();
@@ -291,19 +328,23 @@ function disposeGroup(group) {
 // ---------------------------------------------------------------- controls
 
 for (const input of ui.results.querySelectorAll('[data-class]')) {
-  input.addEventListener('change', applyFilters);
+  input.addEventListener('change', () => {
+    // Rooms follow the walls on screen, so only the rooms toggle skips a rebuild.
+    if (input.dataset.class === 'space') {
+      spaceGroup.visible = input.checked;
+      hideTooltip();
+    } else {
+      applyFilters();
+    }
+  });
 }
 ui.confidence.addEventListener('input', applyFilters);
 
 function applyFilters() {
-  const min = Number(ui.confidence.value);
-  ui.confidenceValue.textContent = min.toFixed(2);
-  for (const c of CLASSES) {
-    classGroups[c].visible = ui.results.querySelector(`[data-class="${c}"]`).checked;
-    for (const mesh of classGroups[c].children) mesh.visible = mesh.userData.detection.score >= min;
-  }
+  ui.confidenceValue.textContent = Number(ui.confidence.value).toFixed(2);
+  spaceGroup.visible = ui.results.querySelector('[data-class="space"]').checked;
+  rebuildScene();
   ui.exportIfc.disabled = visibleDetections().length === 0;
-  hideTooltip();
 }
 
 // Detections that pass the class toggles and confidence filter, i.e. what is on screen.
@@ -319,6 +360,7 @@ ui.exportIfc.addEventListener('click', () => {
     detections: visibleDetections(),
     plan: state,
     wallHeight: Number(ui.wallHeight.value),
+    includeSpaces: ui.results.querySelector('[data-class="space"]').checked,
   });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(new Blob([ifc], { type: 'application/x-step' }));
@@ -413,6 +455,8 @@ new ResizeObserver(resize).observe(ui.stage);
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let pointerDown = false;
+// Pick priority in the top view: openings over walls over rooms.
+const PICK_ORDER = ['space', ...CLASSES];
 
 renderer.domElement.addEventListener('pointerdown', () => { pointerDown = true; hideTooltip(); });
 window.addEventListener('pointerup', () => { pointerDown = false; });
@@ -423,18 +467,23 @@ renderer.domElement.addEventListener('pointermove', (e) => {
   pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
   raycaster.setFromCamera(pointer, activeCamera());
 
-  const pickable = CLASSES.filter((c) => classGroups[c].visible)
-    .flatMap((c) => classGroups[c].children.filter((m) => m.visible));
-  // In the top view, prefer the opening over the wall it sits in.
+  const pickable = [spaceGroup, ...Object.values(classGroups)].filter((g) => g.visible).flatMap((g) => g.children);
   const hits = raycaster.intersectObjects(pickable, false);
   const hit = state.view === '2d'
-    ? hits.sort((a, b) => CLASSES.indexOf(b.object.userData.detection.cls) - CLASSES.indexOf(a.object.userData.detection.cls))[0]
+    ? hits.sort((a, b) => PICK_ORDER.indexOf(b.object.userData.cls) - PICK_ORDER.indexOf(a.object.userData.cls))[0]
     : hits[0];
   if (!hit) return hideTooltip();
 
-  const d = hit.object.userData.detection;
-  ui.tooltip.innerHTML = `<strong>${d.cls}</strong> ${(d.score * 100).toFixed(1)}%<br>`
-    + `<span>${d.x1},${d.y1} → ${d.x2},${d.y2} px</span>`;
+  const info = hit.object.userData;
+  const d = info.detection;
+  if (info.cls === 'space') {
+    ui.tooltip.innerHTML = `<strong>${info.name}</strong><br><span>${info.area.toFixed(1)} m²</span>`;
+  } else if (info.filler) {
+    ui.tooltip.innerHTML = '<strong>wall</strong> gap fill<br><span>closes the gap next to an opening</span>';
+  } else {
+    ui.tooltip.innerHTML = `<strong>${d.cls}</strong> ${(d.score * 100).toFixed(1)}%<br>`
+      + `<span>${d.x1},${d.y1} → ${d.x2},${d.y2} px</span>`;
+  }
   ui.tooltip.hidden = false;
 
   const tipW = ui.tooltip.offsetWidth;

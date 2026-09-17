@@ -60,11 +60,26 @@ python application.py
 
 ## Browser Viewer
 
-With the server running, open [http://127.0.0.1:5000/](http://127.0.0.1:5000/) to use the built-in Three.js viewer. Choose or drop a floor plan image and press **Detect** to see the detected walls, doors and windows extruded in 3D, or switch to the top view to check the boxes against the plan. You can filter by class and confidence and change the wall height. Hover a box to see its class, score and pixel coordinates.
+With the server running, open [http://127.0.0.1:5000/](http://127.0.0.1:5000/) to use the built-in Three.js viewer. Choose or drop a floor plan image and press **Detect** to see the detected walls, doors and windows extruded in 3D, or switch to the top view to check them against the plan. You can filter by class and confidence (down to 0.5) and change the wall height. Hover an element to see its class, score and pixel coordinates.
 
-**Download IFC4** saves the visible elements as an IFC4 file (`IfcWall`, `IfcDoor`, `IfcWindow` in a site, building and storey hierarchy, in meters). Doors and windows that overlap a wall cut an `IfcOpeningElement` into it. Each element carries a `FloorPlanTo3D_Detection` property set with its confidence and pixel bounding box.
+Each element is drawn as a rectangle fitted to its Mask R-CNN mask, so diagonal walls come out rotated. Doors and windows take the direction and thickness of the wall they sit in. Detected walls usually stop short of an opening, so, as in the Unity client, the gap between an opening and the next wall is closed with a wall piece (shown as "gap fill").
 
-The viewer lives in `static/` and needs no build step. The API response it uses also includes a `scores` array, parallel to `classes`.
+**Rooms** are found from the geometry, since the model has no room class: every region enclosed by walls, gap fills and openings becomes a room, shown as a floor tint with its area. Short gaps at wall ends (up to 1.2 m) also count as room boundaries, so undetected doorways don't merge rooms. Rooms that leak through missing walls are left out.
+
+**Download IFC4** saves what is shown as an IFC4 file (`IfcWall`, `IfcDoor`, `IfcWindow` in a site, building and storey hierarchy, in meters). Doors and windows that overlap a wall cut an `IfcOpeningElement` into it. Rooms are written as `IfcSpace` (named `Space 1`, `Space 2`, ... in reading order), aggregated under the storey, with `Qto_SpaceBaseQuantities` (`NetFloorArea`, `Height`). Each wall, door and window carries a `FloorPlanTo3D_Detection` property set with `IsGapFill`, plus its confidence and pixel bounding box when it was detected.
+
+The viewer lives in `static/` and needs no build step.
+
+### API response
+
+`POST /` with an `image` form file returns parallel arrays, one entry per detection:
+
+- `points`: `{x1, y1, x2, y2}`, the axis-aligned bounding box of the mask in pixels
+- `classes`: `{name}`, one of `wall`, `door`, `window`
+- `scores`: confidence from 0.5 to 1
+- `shapes`: `{cx, cy, length, thickness, angle}`, the rectangle fitted to the mask in pixels; `angle` is the direction of the long side in degrees from +x, with image y pointing down, snapped to 0 or 90 when within 3 degrees
+
+plus `Width`, `Height` (image size) and `averageDoor` (mean door size in pixels, used for scale). The Unity client reads only `points`, `classes` and `averageDoor`.
 
 These steps will prepare your environment for using the API. While the API can be accessed with any client, for a fully integrated experience, we recommend using our Unity application, located in the Unity directory (Unity engine installation required).
 

@@ -10,6 +10,7 @@
   --wall: #7c8594;
   --door: #d97706;
   --window: #0284c7;
+  --space: #16a34a;
   --danger: #c2261a;
   color-scheme: light;
 }
@@ -27,6 +28,7 @@
     --wall: #a3acba;
     --door: #f59e0b;
     --window: #38bdf8;
+    --space: #4ade80;
     --danger: #ff6b5e;
     color-scheme: dark;
   }
@@ -44,6 +46,7 @@
   --wall: #a3acba;
   --door: #f59e0b;
   --window: #38bdf8;
+  --space: #4ade80;
   --danger: #ff6b5e;
   color-scheme: dark;
 }
@@ -159,6 +162,7 @@ body {
 .swatch.wall { background: var(--wall); }
 .swatch.door { background: var(--door); }
 .swatch.window { background: var(--window); }
+.swatch.space { background: var(--space); }
 
 .count, output, .meta dd { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
 .count { color: var(--muted); }
